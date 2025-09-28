@@ -120,7 +120,7 @@ def _mistral_headers():
         raise HTTPException(500, "Missing MISTRAL_API_KEY (set it in Space → Settings → Secrets).")
     return {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
 
-def chat(messages, model: str = CHAT_MODEL_DEFAULT, temperature=0.2, max_tokens=300) -> str:
+def chat(messages, model: str = CHAT_MODEL_DEFAULT, temperature=0.0, max_tokens=220) -> str:
     r = requests.post(
         f"{MISTRAL_BASE}/chat/completions",
         headers=_mistral_headers(),
@@ -360,16 +360,14 @@ def query(q: QueryIn):
     if not user_q:
         return {"answer": "Please type a question.", "citations": []}
 
-    # policy gate
+    # ---- policy + smalltalk gates ----
     guard = policy_gate(user_q)
     if guard:
         return {"answer": guard, "citations": []}
-
-    # smalltalk
     if is_smalltalk(user_q):
         return {"answer": "Hi! Upload PDFs, then ask about them.", "citations": []}
 
-    # retrieve (original + transformed) and fuse via RRF
+    # ---- retrieval: original + transformed, then RRF fuse ----
     hits_a = hybrid_search(user_q, top_k=TOP_K)
     tq = transform_query_basic(user_q)
     hits_b = hybrid_search(tq, top_k=TOP_K) if tq != user_q else []
@@ -378,7 +376,7 @@ def query(q: QueryIn):
     if not hits or max(h["semantic"] for h in hits) < SIM_THRESHOLD:
         return {"answer": "insufficient evidence", "citations": []}
 
-    # take top-K, then dedupe by (title, idx)
+    # ---- take top-K then de-dup by (title, idx) ----
     chosen = hits[:FINAL_K]
     uniq, seen = [], set()
     for c in chosen:
@@ -390,38 +388,62 @@ def query(q: QueryIn):
     if not uniq:
         return {"answer": "insufficient evidence", "citations": []}
 
-    # build compact evidence context
-    style = choose_style(user_q)
+    # ---- numeric guard for percent/ratio queries ----
+    ql = user_q.lower()
+    wants_percent = any(k in ql for k in ["percent", "percentage", "share", "ratio", "%"])
+    if wants_percent:
+        has_percent_in_evidence = any(re.search(r"\b\d{1,3}%\b", (c["text"] or "")) for c in uniq)
+        if not has_percent_in_evidence:
+            return {"answer": "insufficient evidence", "citations": []}
+
+    # ---- build evidence context (send full chunk if tiny corpus) ----
+    tiny_corpus = len(uniq) <= 3
     blocks = []
     for i, c in enumerate(uniq, start=1):
-        snippet = (c["text"] or "")[:MAX_CHARS_PER_BLOCK]
+        snippet = (c["text"] or "") if tiny_corpus else (c["text"] or "")[:MAX_CHARS_PER_BLOCK]
         blocks.append(f"[C{i}] {snippet}\n-- Source: {c['title']} (chunk {c['idx']})")
     context = "\n\n".join(blocks)
 
-    # prompt shaping
+    # ---- prompt shaping (exact numbers + dates; strict insufficiency rule) ----
+    style = choose_style(user_q)
     if style == "list":
-        sys = ("Answer strictly from EVIDENCE CONTEXT. Provide a concise bulleted list. "
-               "Include inline citations [C#] for each bullet. "
-               "If evidence is insufficient, reply exactly: insufficient evidence.")
+        sys = (
+            "Answer strictly from EVIDENCE CONTEXT. Provide a concise bulleted list. "
+            "For each bullet, include exact numbers and month/year if present, with an inline citation [C#]. "
+            "If an exact percentage is not present in the evidence, reply exactly: insufficient evidence."
+        )
     elif style == "table":
-        sys = ("Answer strictly from EVIDENCE CONTEXT. Provide a compact markdown table with appropriate columns. "
-               "Include inline citations [C#] in the table cells. "
-               "If evidence is insufficient, reply exactly: insufficient evidence.")
+        sys = (
+            "Answer strictly from EVIDENCE CONTEXT. Provide a compact markdown table; "
+            "include exact numbers and month/year if present with inline citations [C#] in cells. "
+            "If an exact percentage is not present in the evidence, reply exactly: insufficient evidence."
+        )
     else:
-        sys = ("Answer strictly from the EVIDENCE CONTEXT. "
-               "Include inline citations [C#] for every claim. "
-               "If evidence is insufficient, reply exactly: insufficient evidence.")
+        sys = (
+            "Answer strictly from the EVIDENCE CONTEXT. "
+            "State the exact percentage(s) and the corresponding month/year if present. "
+            "If multiple time points exist, report each explicitly and include inline citations for each figure "
+            "(e.g., 53% in June 2024 [C1]; 73% in June 2025 [C2]). "
+            "If an exact percentage is not present in the evidence, reply exactly: insufficient evidence. "
+            "If evidence is insufficient, reply exactly: insufficient evidence."
+        )
 
     prompt = f"QUESTION:\n{user_q}\n\nEVIDENCE CONTEXT:\n{context}"
-    answer = chat([{"role": "system", "content": sys},
-                   {"role": "user", "content": prompt}])
 
-    # post-hoc hallucination filter
-    answer = evidence_filter(answer)
-    if answer == "insufficient evidence":
+    # ---- generate (chat() should use temperature=0.0 for determinism) ----
+    answer = chat(
+        [
+            {"role": "system", "content": sys},
+            {"role": "user",  "content": prompt},
+        ],
+        # rely on your chat() defaults for model/temperature/max_tokens
+    )
+
+    # ---- softer hallucination check: require at least one citation tag ----
+    if not re.search(r"\[C\d+\]", answer or ""):
         return {"answer": "insufficient evidence", "citations": []}
 
-    # show only citations actually used in the answer
+    # ---- show only citations actually used in the answer ----
     used_nums = set(re.findall(r"\[C(\d+)\]", answer))
     if used_nums:
         cits = []
