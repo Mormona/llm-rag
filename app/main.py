@@ -276,3 +276,29 @@ def query(q: QueryIn):
     cits = [{"label": f"[C{i+1}]", "title": c["title"], "chunk_index": c["idx"],
              "score_semantic": round(c["semantic"],3)} for i, c in enumerate(chosen)]
     return {"answer": snippet, "citations": cits}
+
+import os
+from fastapi import HTTPException
+
+@app.get("/debug/env")
+def debug_env():
+    # True/False only; does not leak the key
+    return {"has_mistral_key": bool(os.getenv("MISTRAL_API_KEY"))}
+
+@app.get("/debug/ping-emb")
+def debug_ping_emb():
+    import requests
+    key = os.getenv("MISTRAL_API_KEY")
+    if not key:
+        return {"ok": False, "error": "MISTRAL_API_KEY not set"}
+    try:
+        r = requests.post(
+            "https://api.mistral.ai/v1/embeddings",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"model": "mistral-embed", "input": ["hello"]},
+            timeout=30,
+        )
+        return {"ok": r.status_code < 400, "status": r.status_code, "body": r.text[:200]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
