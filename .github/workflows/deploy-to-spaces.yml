@@ -1,0 +1,18 @@
+name: Deploy to Hugging Face Space
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push to Space
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          git remote add space https://huggingface:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/MichelleHF/LLM-Rag.git
+          git push space HEAD:main --force
