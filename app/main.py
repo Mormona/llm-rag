@@ -373,13 +373,21 @@ def query(q: QueryIn):
     hits_b = hybrid_search(tq, top_k=TOP_K) if tq != user_q else []
     hits = rrf_merge([hits_a, hits_b] if hits_b else [hits_a])
 
+    # strict but simple acceptance
     if not hits or max(h["semantic"] for h in hits) < SIM_THRESHOLD:
         return {"answer": "insufficient evidence", "citations": []}
 
-    # ---- take top-K then de-dup by (title, idx) ----
-    chosen = hits[:FINAL_K]
+    # ---- adaptive selection for tiny corpora ----
+    # If we have very few candidates, keep them all (no diversity tricks, no trimming).
+    TINY_THRESHOLD = 5
+    if len(hits) <= TINY_THRESHOLD:
+        selected = hits  # keep all
+    else:
+        selected = hits[:FINAL_K]  # normal case
+
+    # de-duplicate by (title, idx)
     uniq, seen = [], set()
-    for c in chosen:
+    for c in selected:
         key = (c["title"], c["idx"])
         if key in seen:
             continue
@@ -388,15 +396,7 @@ def query(q: QueryIn):
     if not uniq:
         return {"answer": "insufficient evidence", "citations": []}
 
-    # ---- numeric guard for percent/ratio queries ----
-    ql = user_q.lower()
-    wants_percent = any(k in ql for k in ["percent", "percentage", "share", "ratio", "%"])
-    if wants_percent:
-        has_percent_in_evidence = any(re.search(r"\b\d{1,3}%\b", (c["text"] or "")) for c in uniq)
-        if not has_percent_in_evidence:
-            return {"answer": "insufficient evidence", "citations": []}
-
-    # ---- build evidence context (send full chunk if tiny corpus) ----
+    # ---- build evidence context (send full chunks if tiny) ----
     tiny_corpus = len(uniq) <= 3
     blocks = []
     for i, c in enumerate(uniq, start=1):
@@ -404,47 +404,45 @@ def query(q: QueryIn):
         blocks.append(f"[C{i}] {snippet}\n-- Source: {c['title']} (chunk {c['idx']})")
     context = "\n\n".join(blocks)
 
-    # ---- prompt shaping (exact numbers + dates; strict insufficiency rule) ----
+    # ---- prompt shaping (general, precise, citations everywhere) ----
     style = choose_style(user_q)
     if style == "list":
         sys = (
             "Answer strictly from EVIDENCE CONTEXT. Provide a concise bulleted list. "
-            "For each bullet, include exact numbers and month/year if present, with an inline citation [C#]. "
-            "If an exact percentage is not present in the evidence, reply exactly: insufficient evidence."
+            "Include inline citations [C#] for each bullet. "
+            "If evidence is insufficient, reply exactly: insufficient evidence."
         )
     elif style == "table":
         sys = (
-            "Answer strictly from EVIDENCE CONTEXT. Provide a compact markdown table; "
-            "include exact numbers and month/year if present with inline citations [C#] in cells. "
-            "If an exact percentage is not present in the evidence, reply exactly: insufficient evidence."
+            "Answer strictly from EVIDENCE CONTEXT. Provide a compact markdown table with appropriate columns. "
+            "Include inline citations [C#] in table cells. "
+            "If evidence is insufficient, reply exactly: insufficient evidence."
         )
     else:
         sys = (
             "Answer strictly from the EVIDENCE CONTEXT. "
-            "State the exact percentage(s) and the corresponding month/year if present. "
-            "If multiple time points exist, report each explicitly and include inline citations for each figure "
-            "(e.g., 53% in June 2024 [C1]; 73% in June 2025 [C2]). "
-            "If an exact percentage is not present in the evidence, reply exactly: insufficient evidence. "
+            "State concrete figures and dates/months if present. "
+            "Include inline citations [C#] for every claim. "
             "If evidence is insufficient, reply exactly: insufficient evidence."
         )
 
     prompt = f"QUESTION:\n{user_q}\n\nEVIDENCE CONTEXT:\n{context}"
 
-    # ---- generate (chat() should use temperature=0.0 for determinism) ----
+    # ---- generate (ensure chat() default uses temperature=0.0 for determinism) ----
     answer = chat(
         [
             {"role": "system", "content": sys},
             {"role": "user",  "content": prompt},
         ],
-        # rely on your chat() defaults for model/temperature/max_tokens
     )
 
-    # ---- softer hallucination check: require at least one citation tag ----
-    if not re.search(r"\[C\d+\]", answer or ""):
-        return {"answer": "insufficient evidence", "citations": []}
+    # Do NOT aggressively strip answers; just require at least one citation tag if you want.
+    # If you prefer, you can uncomment the two lines below.
+    # if not re.search(r"\[C\d+\]", answer or ""):
+    #     return {"answer": "insufficient evidence", "citations": []}
 
-    # ---- show only citations actually used in the answer ----
-    used_nums = set(re.findall(r"\[C(\d+)\]", answer))
+    # ---- show only citations actually used in the answer (fallback to all uniq) ----
+    used_nums = set(re.findall(r"\[C(\d+)\]", answer or ""))
     if used_nums:
         cits = []
         for i, c in enumerate(uniq, start=1):
@@ -463,6 +461,7 @@ def query(q: QueryIn):
                 for i, c in enumerate(uniq, start=1)]
 
     return {"answer": answer, "citations": cits}
+
 
 # --------- Debug endpoints ---------
 @app.get("/debug/env")
