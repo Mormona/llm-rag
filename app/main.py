@@ -278,37 +278,68 @@ async def ingest(files: List[UploadFile] = File(...)):
 def query(q: QueryIn):
     user_q = (q.query or "").strip()
     if not user_q:
-        return {"answer":"Please type a question.", "citations":[]}
+        return {"answer": "Please type a question.", "citations": []}
 
+    # light smalltalk guard
     if re.match(r"^\s*(hi|hello|hey)\b", user_q, re.I):
-        return {"answer":"Hi! Upload PDFs, then ask about them.", "citations":[]}
+        return {"answer": "Hi! Upload PDFs, then ask about them.", "citations": []}
 
+    # retrieve candidates
     hits = hybrid_search(user_q, top_k=TOP_K)
-    if not hits or max([h["semantic"] for h in hits]) < SIM_THRESHOLD:
-        return {"answer":"insufficient evidence", "citations":[]}
+    if not hits or max(h["semantic"] for h in hits) < SIM_THRESHOLD:
+        return {"answer": "insufficient evidence", "citations": []}
 
+    # take top-K, then de-duplicate by (title, idx)
     chosen = hits[:FINAL_K]
+    uniq, seen = [], set()
+    for c in chosen:
+        key = (c["title"], c["idx"])
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(c)
 
-    # Build evidence context with tags [C1]...
+    if not uniq:
+        return {"answer": "insufficient evidence", "citations": []}
+
+    # build compact evidence context
+    MAX_CHARS = 800  # trim each chunk to keep prompt small/fast
     blocks = []
-    for i, c in enumerate(chosen, start=1):
-        blocks.append(f"[C{i}] {c['text']}\n-- Source: {c['title']} (chunk {c['idx']})")
+    for i, c in enumerate(uniq, start=1):
+        snippet = (c["text"] or "")[:MAX_CHARS]
+        blocks.append(f"[C{i}] {snippet}\n-- Source: {c['title']} (chunk {c['idx']})")
     context = "\n\n".join(blocks)
 
+    # prompt policy
     sys = (
-        "You answer strictly from the EVIDENCE CONTEXT using inline citations like [C1],[C2]. "
-        "If evidence is insufficient, reply exactly: insufficient evidence."
+        "You must answer strictly from the EVIDENCE CONTEXT using inline citations like [C1], [C2]. "
+        "If the evidence is insufficient to answer, reply exactly: insufficient evidence."
     )
     prompt = f"QUESTION:\n{user_q}\n\nEVIDENCE CONTEXT:\n{context}"
 
-    answer = chat([
-        {"role":"system","content":sys},
-        {"role":"user","content":prompt}
-    ])
+    # generate
+    answer = chat(
+        [
+            {"role": "system", "content": sys},
+            {"role": "user", "content": prompt},
+        ],
+        # ensure your chat() default uses a valid model like 'mistral-small'
+        # and a modest max_tokens (e.g., 300) for speed
+    )
 
-    cits = [{"label": f"[C{i+1}]", "title": c["title"], "chunk_index": c["idx"],
-             "score_semantic": round(c["semantic"],3)} for i, c in enumerate(chosen)]
+    # citations (aligned with uniq list)
+    cits = [
+        {
+            "label": f"[C{i+1}]",
+            "title": c["title"],
+            "chunk_index": c["idx"],
+            "score_semantic": round(c["semantic"], 3),
+        }
+        for i, c in enumerate(uniq)
+    ]
+
     return {"answer": answer, "citations": cits}
+
 
 import os
 from fastapi import HTTPException
