@@ -13,7 +13,7 @@ import requests
 # --------- Config ---------
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
 MISTRAL_BASE = "https://api.mistral.ai/v1"
-EMBED_MODEL_CANDIDATES = ["mistral-embed", "mistral-embed-v0.2", "mistral-embed-latest"]
+EMBED_MODEL_CANDIDATES = [ "mistral-embed-v0.2","mistral-embed"]
 
 DB_PATH = "rag.db"
 DOC_DIR = "storage"
