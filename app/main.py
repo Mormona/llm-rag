@@ -117,23 +117,31 @@ def _mistral_headers():
         raise HTTPException(500, "Missing MISTRAL_API_KEY (set it in Space → Settings → Secrets).")
     return {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
 
-def embed_texts(texts: List[str]) -> List[List[float]]:
-    last_err = None
-    for model in EMBED_MODEL_CANDIDATES:
-        try:
-            r = requests.post(
-                f"{MISTRAL_BASE}/embeddings",
-                headers=_mistral_headers(),
-                json={"model": model, "input": texts},
-                timeout=60
-            )
-            if r.status_code < 400:
-                data = r.json()["data"]
-                return [d["embedding"] for d in data]
-            last_err = r.text
-        except Exception as e:
-            last_err = str(e)
-    raise HTTPException(500, f"Mistral embeddings failed: {last_err}")
+def embed_texts(texts: List[str], batch_size: int = 16) -> List[List[float]]:
+    """Embed texts in batches to respect Mistral API limits."""
+    all_embs = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i+batch_size]
+        last_err = None
+        for model in EMBED_MODEL_CANDIDATES:
+            try:
+                r = requests.post(
+                    f"{MISTRAL_BASE}/embeddings",
+                    headers=_mistral_headers(),
+                    json={"model": model, "input": batch},
+                    timeout=60
+                )
+                if r.status_code < 400:
+                    data = r.json()["data"]
+                    all_embs.extend([d["embedding"] for d in data])
+                    break
+                last_err = r.text
+            except Exception as e:
+                last_err = str(e)
+        else:
+            # If no model worked for this batch
+            raise HTTPException(500, f"Mistral embeddings failed: {last_err}")
+    return all_embs
 
 def cosine(a: np.ndarray, b: np.ndarray) -> float:
     na = np.linalg.norm(a); nb = np.linalg.norm(b)
