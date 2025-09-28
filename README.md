@@ -1,3 +1,15 @@
+---
+title: LLM-Rag
+emoji: 📚
+colorFrom: indigo
+colorTo: blue
+sdk: docker
+pinned: false
+---
+
+# LLM-Rag (FastAPI on Docker)
+Deployed via Dockerfile. The app listens on `${PORT}` and serves FastAPI.
+
 # llm-rag
 
 # RAG Mini
