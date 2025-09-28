@@ -378,45 +378,81 @@ def query(q: QueryIn):
     if not hits or max(h["semantic"] for h in hits) < SIM_THRESHOLD:
         return {"answer": "insufficient evidence", "citations": []}
 
-    # take top-K, then dedupe by (title, idx)
-    chosen = hits[:FINAL_K]
+    # --- diversity selection (simple MMR heuristic) ---
+    def _tokset(s): return set(tokenize(s or ""))
+    LAMBDA = 0.75  # relevance vs diversity
+    selected, covered = [], set()
+    for h in hits:
+        if len(selected) >= FINAL_K:
+            break
+        toks = _tokset(h["text"])
+        overlap = len(toks & covered) / (len(toks) + 1e-6)
+        h["_mmr"] = LAMBDA * h["hybrid"] - (1.0 - LAMBDA) * overlap
+        selected.append(h)
+        selected.sort(key=lambda x: x.get("_mmr", x["hybrid"]), reverse=True)
+        selected = selected[:FINAL_K]
+        covered |= toks
+
+    # de-duplicate by (title, idx)
     uniq, seen = [], set()
-    for c in chosen:
+    for c in selected:
         key = (c["title"], c["idx"])
         if key in seen:
             continue
         seen.add(key)
         uniq.append(c)
+
     if not uniq:
         return {"answer": "insufficient evidence", "citations": []}
 
     # build compact evidence context
-    style = choose_style(user_q)
     blocks = []
     for i, c in enumerate(uniq, start=1):
         snippet = (c["text"] or "")[:MAX_CHARS_PER_BLOCK]
         blocks.append(f"[C{i}] {snippet}\n-- Source: {c['title']} (chunk {c['idx']})")
     context = "\n\n".join(blocks)
 
-    # prompt shaping
+    # --- prompt shaping (numbers+dates, multi-citation bias for trends) ---
+    style = choose_style(user_q)
+    ql = user_q.lower()
+    is_trend = any(k in ql for k in [
+        "percent", "percentage", "share", "ratio", "increase", "decrease",
+        "grew", "growth", "rise", "trend", "change", "over time", "by year", "by month"
+    ])
+
     if style == "list":
-        sys = ("Answer strictly from EVIDENCE CONTEXT. Provide a concise bulleted list. "
-               "Include inline citations [C#] for each bullet. "
-               "If evidence is insufficient, reply exactly: insufficient evidence.")
+        sys = (
+            "Answer strictly from EVIDENCE CONTEXT. Provide a concise bulleted list. "
+            "For each bullet that states a figure, include the exact number and the month/year if present, "
+            "and include an inline citation [C#] for that bullet."
+        )
     elif style == "table":
-        sys = ("Answer strictly from EVIDENCE CONTEXT. Provide a compact markdown table with appropriate columns. "
-               "Include inline citations [C#] in the table cells. "
-               "If evidence is insufficient, reply exactly: insufficient evidence.")
+        sys = (
+            "Answer strictly from EVIDENCE CONTEXT. Provide a compact markdown table with appropriate columns. "
+            "Include inline citations [C#] in table cells for each figure/date."
+        )
     else:
-        sys = ("Answer strictly from the EVIDENCE CONTEXT. "
-               "Include inline citations [C#] for every claim. "
-               "If evidence is insufficient, reply exactly: insufficient evidence.")
+        sys = (
+            "Answer strictly from the EVIDENCE CONTEXT. "
+            "State exact percentage(s) and the corresponding month/year if present. "
+            "Include inline citations [C#] for every figure."
+        )
+
+    if is_trend:
+        sys += " Prefer at least two distinct citations when reporting changes over time."
+
+    sys += " If evidence is insufficient, reply exactly: insufficient evidence."
 
     prompt = f"QUESTION:\n{user_q}\n\nEVIDENCE CONTEXT:\n{context}"
-    answer = chat([{"role": "system", "content": sys},
-                   {"role": "user", "content": prompt}])
 
-    # post-hoc hallucination filter
+    answer = chat(
+        [
+            {"role": "system", "content": sys},
+            {"role": "user", "content": prompt},
+        ],
+    )
+
+    # post-hoc hallucination filter: keep only sentences that cite evidence
     answer = evidence_filter(answer)
     if answer == "insufficient evidence":
         return {"answer": "insufficient evidence", "citations": []}
@@ -441,6 +477,7 @@ def query(q: QueryIn):
                 for i, c in enumerate(uniq, start=1)]
 
     return {"answer": answer, "citations": cits}
+
 
 # --------- Debug endpoints ---------
 @app.get("/debug/env")
