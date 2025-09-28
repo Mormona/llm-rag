@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+PyPDF2
+numpy
+python-dotenv
+requests
