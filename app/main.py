@@ -373,17 +373,14 @@ def query(q: QueryIn):
     hits_b = hybrid_search(tq, top_k=TOP_K) if tq != user_q else []
     hits = rrf_merge([hits_a, hits_b] if hits_b else [hits_a])
 
-    # strict but simple acceptance
+    # accept only if we have a reasonably similar candidate
     if not hits or max(h["semantic"] for h in hits) < SIM_THRESHOLD:
         return {"answer": "insufficient evidence", "citations": []}
 
-    # ---- adaptive selection for tiny corpora ----
-    # If we have very few candidates, keep them all (no diversity tricks, no trimming).
+    # ---- adaptive selection ----
+    # If the candidate pool is tiny, keep them all. Otherwise take top-K.
     TINY_THRESHOLD = 5
-    if len(hits) <= TINY_THRESHOLD:
-        selected = hits  # keep all
-    else:
-        selected = hits[:FINAL_K]  # normal case
+    selected = hits if len(hits) <= TINY_THRESHOLD else hits[:FINAL_K]
 
     # de-duplicate by (title, idx)
     uniq, seen = [], set()
@@ -396,7 +393,7 @@ def query(q: QueryIn):
     if not uniq:
         return {"answer": "insufficient evidence", "citations": []}
 
-    # ---- build evidence context (send full chunks if tiny) ----
+    # ---- build evidence context (send full chunks if tiny to avoid truncating key numbers) ----
     tiny_corpus = len(uniq) <= 3
     blocks = []
     for i, c in enumerate(uniq, start=1):
@@ -404,31 +401,35 @@ def query(q: QueryIn):
         blocks.append(f"[C{i}] {snippet}\n-- Source: {c['title']} (chunk {c['idx']})")
     context = "\n\n".join(blocks)
 
-    # ---- prompt shaping (general, precise, citations everywhere) ----
+    # ---- prompt shaping: allow ranges, insist on citing every claim ----
     style = choose_style(user_q)
     if style == "list":
         sys = (
             "Answer strictly from EVIDENCE CONTEXT. Provide a concise bulleted list. "
-            "Include inline citations [C#] for each bullet. "
+            "Cite every bullet with [C#]. If exact values are present, use them; "
+            "if the evidence reports a range or qualitative bound (e.g., 'more than 70%'), report that faithfully. "
             "If evidence is insufficient, reply exactly: insufficient evidence."
         )
     elif style == "table":
         sys = (
             "Answer strictly from EVIDENCE CONTEXT. Provide a compact markdown table with appropriate columns. "
-            "Include inline citations [C#] in table cells. "
+            "Cite each figure/bound in-table with [C#]. Use exact values when present; "
+            "otherwise report ranges/bounds exactly as stated. "
             "If evidence is insufficient, reply exactly: insufficient evidence."
         )
     else:
         sys = (
             "Answer strictly from the EVIDENCE CONTEXT. "
-            "State concrete figures and dates/months if present. "
-            "Include inline citations [C#] for every claim. "
+            "Use exact percentages and month/year when present. "
+            "If the evidence reports a range or qualitative bound (e.g., 'more than 70%'), report that faithfully. "
+            "When multiple time points exist, list each explicitly and include inline citations for each figure/bound "
+            "(e.g., 53% in June 2024 [C1]; more than 70% by July 2025 [C2]). "
             "If evidence is insufficient, reply exactly: insufficient evidence."
         )
 
     prompt = f"QUESTION:\n{user_q}\n\nEVIDENCE CONTEXT:\n{context}"
 
-    # ---- generate (ensure chat() default uses temperature=0.0 for determinism) ----
+    # ---- generate (chat() should default to temperature=0.0, max_tokens ~200–300) ----
     answer = chat(
         [
             {"role": "system", "content": sys},
@@ -436,12 +437,7 @@ def query(q: QueryIn):
         ],
     )
 
-    # Do NOT aggressively strip answers; just require at least one citation tag if you want.
-    # If you prefer, you can uncomment the two lines below.
-    # if not re.search(r"\[C\d+\]", answer or ""):
-    #     return {"answer": "insufficient evidence", "citations": []}
-
-    # ---- show only citations actually used in the answer (fallback to all uniq) ----
+    # ---- show only citations actually used in the answer (fallback to all uniq if none) ----
     used_nums = set(re.findall(r"\[C(\d+)\]", answer or ""))
     if used_nums:
         cits = []
@@ -454,6 +450,7 @@ def query(q: QueryIn):
                     "score_semantic": round(c["semantic"], 3),
                 })
     else:
+        # If the model forgot to include tags, keep the answer but show all evidence blocks used.
         cits = [{"label": f"[C{i}]",
                  "title": c["title"],
                  "chunk_index": c["idx"],
@@ -461,6 +458,7 @@ def query(q: QueryIn):
                 for i, c in enumerate(uniq, start=1)]
 
     return {"answer": answer, "citations": cits}
+
 
 
 # --------- Debug endpoints ---------
