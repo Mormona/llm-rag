@@ -302,43 +302,57 @@ def query(q: QueryIn):
     if not uniq:
         return {"answer": "insufficient evidence", "citations": []}
 
-    # build compact evidence context
-    MAX_CHARS = 800  # trim each chunk to keep prompt small/fast
+    # build compact evidence context (trim chunks for speed)
+    MAX_CHARS = 800
     blocks = []
     for i, c in enumerate(uniq, start=1):
         snippet = (c["text"] or "")[:MAX_CHARS]
         blocks.append(f"[C{i}] {snippet}\n-- Source: {c['title']} (chunk {c['idx']})")
     context = "\n\n".join(blocks)
 
-    # prompt policy
+    # prompt: encourage aggregation + citing all claims; strict insufficiency rule
     sys = (
-        "You must answer strictly from the EVIDENCE CONTEXT using inline citations like [C1], [C2]. "
-        "If the evidence is insufficient to answer, reply exactly: insufficient evidence."
+        "Answer strictly from the EVIDENCE CONTEXT. "
+        "If multiple relevant figures or time points exist, report each as a concise list. "
+        "Include inline citations for every claim you make (e.g., [C1], [C2]). "
+        "If evidence is insufficient, reply exactly: insufficient evidence."
     )
     prompt = f"QUESTION:\n{user_q}\n\nEVIDENCE CONTEXT:\n{context}"
 
-    # generate
+    # generate (ensure chat() uses a valid model like 'mistral-small' and modest max_tokens)
     answer = chat(
         [
             {"role": "system", "content": sys},
             {"role": "user", "content": prompt},
         ],
-        # ensure your chat() default uses a valid model like 'mistral-small'
-        # and a modest max_tokens (e.g., 300) for speed
     )
 
-    # citations (aligned with uniq list)
-    cits = [
-        {
-            "label": f"[C{i+1}]",
-            "title": c["title"],
-            "chunk_index": c["idx"],
-            "score_semantic": round(c["semantic"], 3),
-        }
-        for i, c in enumerate(uniq)
-    ]
+    # --- show only citations actually used in the answer ---
+    used_nums = set(re.findall(r"\[C(\d+)\]", answer))
+    if used_nums:
+        cits = []
+        for i, c in enumerate(uniq, start=1):
+            if str(i) in used_nums:
+                cits.append({
+                    "label": f"[C{i}]",
+                    "title": c["title"],
+                    "chunk_index": c["idx"],
+                    "score_semantic": round(c["semantic"], 3),
+                })
+    else:
+        # fallback: if model forgot to cite, show all uniq (or return insufficient if you prefer)
+        cits = [
+            {
+                "label": f"[C{i}]",
+                "title": c["title"],
+                "chunk_index": c["idx"],
+                "score_semantic": round(c["semantic"], 3),
+            }
+            for i, c in enumerate(uniq, start=1)
+        ]
 
     return {"answer": answer, "citations": cits}
+
 
 
 import os
