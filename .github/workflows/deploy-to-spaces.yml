@@ -8,11 +8,31 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo (full history, no LFS)
+        uses: actions/checkout@v4
+        with:
+            fetch-depth: 0     # <-- FULL history, not shallow
+            lfs: false         # <-- don't pull LFS files in CI
 
-      - name: Push to Space
+      - name: Push to Space (mirror main)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SPACE_USER: MichelleHF
+          SPACE_NAME: LLM-Rag
         run: |
-          git config user.email "actions@github.com"
-          git config user.name "github-actions"
-          git remote add space https://huggingface:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/MichelleHF/LLM-Rag.git
-          git push space HEAD:main --force
+          set -e
+
+          if [ -z "$HF_TOKEN" ]; then
+            echo "HF_TOKEN secret is missing."
+            exit 1
+          fi
+
+          # Ensure we have a branch named 'main' checked out
+          git rev-parse --abbrev-ref HEAD
+
+          # Clean up/add remote each run
+          git remote remove space || true
+          git remote add space "https://huggingface:${HF_TOKEN}@huggingface.co/spaces/${SPACE_USER}/${SPACE_NAME}.git"
+
+          # Push local main to Space main (force to mirror)
+          git push space main:main --force
