@@ -111,6 +111,18 @@ def idf(con, term: str, total_chunks: int) -> float:
     if df == 0: return 0.0
     return math.log((1 + total_chunks) / (1 + df)) + 1.0
 
+def chat(messages, model="mistral-small-latest", temperature=0.2, max_tokens=700) -> str:
+    r = requests.post(
+        f"{MISTRAL_BASE}/chat/completions",
+        headers=_mistral_headers(),
+        json={"model": model, "messages": messages,
+              "temperature": temperature, "max_tokens": max_tokens},
+        timeout=120
+    )
+    if r.status_code >= 400:
+        raise HTTPException(500, f"Mistral chat error: {r.text}")
+    return r.json()["choices"][0]["message"]["content"].strip()
+
 # --------- Mistral API (embeddings) ---------
 def _mistral_headers():
     if not MISTRAL_API_KEY:
@@ -268,7 +280,6 @@ def query(q: QueryIn):
     if not user_q:
         return {"answer":"Please type a question.", "citations":[]}
 
-    # very light smalltalk guard
     if re.match(r"^\s*(hi|hello|hey)\b", user_q, re.I):
         return {"answer":"Hi! Upload PDFs, then ask about them.", "citations":[]}
 
@@ -277,13 +288,27 @@ def query(q: QueryIn):
         return {"answer":"insufficient evidence", "citations":[]}
 
     chosen = hits[:FINAL_K]
-    # For Step 1 (no LLM), return top snippets as the “answer”
-    snippet = "Here are the most relevant snippets:\n\n" + "\n\n".join(
-        [f"[C{i+1}] {c['text'][:600]}..." for i, c in enumerate(chosen)]
+
+    # Build evidence context with tags [C1]...
+    blocks = []
+    for i, c in enumerate(chosen, start=1):
+        blocks.append(f"[C{i}] {c['text']}\n-- Source: {c['title']} (chunk {c['idx']})")
+    context = "\n\n".join(blocks)
+
+    sys = (
+        "You answer strictly from the EVIDENCE CONTEXT using inline citations like [C1],[C2]. "
+        "If evidence is insufficient, reply exactly: insufficient evidence."
     )
+    prompt = f"QUESTION:\n{user_q}\n\nEVIDENCE CONTEXT:\n{context}"
+
+    answer = chat([
+        {"role":"system","content":sys},
+        {"role":"user","content":prompt}
+    ])
+
     cits = [{"label": f"[C{i+1}]", "title": c["title"], "chunk_index": c["idx"],
              "score_semantic": round(c["semantic"],3)} for i, c in enumerate(chosen)]
-    return {"answer": snippet, "citations": cits}
+    return {"answer": answer, "citations": cits}
 
 import os
 from fastapi import HTTPException
