@@ -1,7 +1,7 @@
-# app/main.py — Step 1: ingest + retrieve (no LLM generation yet)
+# app/main.py — RAG mini with intent, transform+RRF, shaping, hallucination filter, policy gate
 
 import os, io, re, json, math, time, string, sqlite3, hashlib
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +13,8 @@ import requests
 # --------- Config ---------
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
 MISTRAL_BASE = "https://api.mistral.ai/v1"
-EMBED_MODEL_CANDIDATES = [ "mistral-embed-v0.2","mistral-embed"]
+EMBED_MODEL_CANDIDATES = ["mistral-embed-v0.2", "mistral-embed"]
+CHAT_MODEL_DEFAULT = "mistral-small"  # valid, fast
 
 DB_PATH = "rag.db"
 DOC_DIR = "storage"
@@ -24,7 +25,8 @@ CHUNK_OVERLAP = 200
 TOP_K = 8
 FINAL_K = 4
 SEMANTIC_WEIGHT = 0.6
-SIM_THRESHOLD = 0.22
+SIM_THRESHOLD = 0.22  # raise to 0.25 for stricter "insufficient evidence"
+MAX_CHARS_PER_BLOCK = 800  # trim each evidence block for speed
 
 # --------- FastAPI ---------
 app = FastAPI(title="RAG Mini")
@@ -33,7 +35,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
 
 @app.get("/healthz")
 def health():
-    return {"status":"ok", "has_key": bool(MISTRAL_API_KEY)}
+    return {"status": "ok", "has_key": bool(MISTRAL_API_KEY)}
 
 @app.get("/", response_class=HTMLResponse)
 def root():
@@ -42,7 +44,7 @@ def root():
 @app.get("/ui", response_class=HTMLResponse)
 def ui():
     try:
-        with open("static/index.html","r",encoding="utf-8") as f:
+        with open("static/index.html", "r", encoding="utf-8") as f:
             return HTMLResponse(f.read())
     except Exception:
         return HTMLResponse("<h1>UI not found</h1><p>Create static/index.html</p>", status_code=200)
@@ -88,7 +90,7 @@ def tokenize(txt: str) -> List[str]:
     txt = txt.lower().translate(str.maketrans("", "", string.punctuation))
     return [t for t in txt.split() if t and t not in STOP]
 
-def tf_counts(txt: str) -> Dict[str,int]:
+def tf_counts(txt: str) -> Dict[str, int]:
     d = {}
     for t in tokenize(txt):
         d[t] = d.get(t, 0) + 1
@@ -98,7 +100,7 @@ def update_df(con, terms: List[str]):
     for t in set(terms):
         cur = con.execute("SELECT df FROM vocab WHERE term=?", (t,)).fetchone()
         if cur:
-            con.execute("UPDATE vocab SET df=? WHERE term=?", (cur[0]+1, t))
+            con.execute("UPDATE vocab SET df=? WHERE term=?", (cur[0] + 1, t))
         else:
             con.execute("INSERT INTO vocab(term, df) VALUES (?, ?)", (t, 1))
 
@@ -108,10 +110,17 @@ def all_chunk_count(con) -> int:
 def idf(con, term: str, total_chunks: int) -> float:
     row = con.execute("SELECT df FROM vocab WHERE term=?", (term,)).fetchone()
     df = row[0] if row else 0
-    if df == 0: return 0.0
+    if df == 0:
+        return 0.0
     return math.log((1 + total_chunks) / (1 + df)) + 1.0
 
-def chat(messages, model="mistral-small-latest", temperature=0.2, max_tokens=700) -> str:
+# --------- Mistral API helpers ---------
+def _mistral_headers():
+    if not MISTRAL_API_KEY:
+        raise HTTPException(500, "Missing MISTRAL_API_KEY (set it in Space → Settings → Secrets).")
+    return {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
+
+def chat(messages, model: str = CHAT_MODEL_DEFAULT, temperature=0.2, max_tokens=300) -> str:
     r = requests.post(
         f"{MISTRAL_BASE}/chat/completions",
         headers=_mistral_headers(),
@@ -123,17 +132,11 @@ def chat(messages, model="mistral-small-latest", temperature=0.2, max_tokens=700
         raise HTTPException(500, f"Mistral chat error: {r.text}")
     return r.json()["choices"][0]["message"]["content"].strip()
 
-# --------- Mistral API (embeddings) ---------
-def _mistral_headers():
-    if not MISTRAL_API_KEY:
-        raise HTTPException(500, "Missing MISTRAL_API_KEY (set it in Space → Settings → Secrets).")
-    return {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
-
 def embed_texts(texts: List[str], batch_size: int = 16) -> List[List[float]]:
     """Embed texts in batches to respect Mistral API limits."""
     all_embs = []
     for i in range(0, len(texts), batch_size):
-        batch = texts[i:i+batch_size]
+        batch = texts[i:i + batch_size]
         last_err = None
         for model in EMBED_MODEL_CANDIDATES:
             try:
@@ -151,13 +154,15 @@ def embed_texts(texts: List[str], batch_size: int = 16) -> List[List[float]]:
             except Exception as e:
                 last_err = str(e)
         else:
-            # If no model worked for this batch
             raise HTTPException(500, f"Mistral embeddings failed: {last_err}")
+        # polite pacing for free tier
+        time.sleep(0.03)
     return all_embs
 
 def cosine(a: np.ndarray, b: np.ndarray) -> float:
     na = np.linalg.norm(a); nb = np.linalg.norm(b)
-    if na == 0 or nb == 0: return 0.0
+    if na == 0 or nb == 0:
+        return 0.0
     return float(a.dot(b) / (na * nb))
 
 # --------- PDF → chunks ---------
@@ -171,49 +176,43 @@ def read_pdf_bytes(b: bytes) -> str:
             pages.append("")
     return "\n".join(pages)
 
-def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> list[str]:
+def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> List[str]:
     # normalize whitespace
     text = re.sub(r"\s+", " ", (text or "")).strip()
     if not text:
         return []
-
     # clamp overlap to be strictly less than size
     if overlap >= size:
-        overlap = max(0, size // 5)  # fallback to 20% of size if misconfigured
-
+        overlap = max(0, size // 5)  # fallback to 20% if misconfigured
     step = max(1, size - overlap)
 
     out = []
-    i = 0
-    L = len(text)
+    i, L = 0, len(text)
     while i < L:
-        chunk = text[i:i+size]
-
+        chunk = text[i:i + size]
         # try not to cut mid-sentence for large chunks
         if len(chunk) > int(size * 0.6):
             last_period = chunk.rfind(". ")
             if last_period != -1 and last_period > int(size * 0.4):
-                chunk = chunk[:last_period+1]
-
+                chunk = chunk[:last_period + 1]
         out.append(chunk.strip())
-        i += step  # fixed step, not len(chunk) - overlap
-
+        i += step
     return [c for c in out if c]
-
 
 # --------- Persist ---------
 def save_document(filename: str, raw: bytes, chunks: List[str]):
+    """Insert a new document; skip if same hash already exists."""
     h = hashlib.sha256(raw).hexdigest()
     with db() as con:
         row = con.execute("SELECT id FROM documents WHERE doc_hash=?", (h,)).fetchone()
         if row:
-            doc_id = row[0]
-        else:
-            con.execute(
-                "INSERT INTO documents(doc_hash, filename, title, n_chunks, created_at) VALUES (?, ?, ?, ?, ?)",
-                (h, filename, os.path.splitext(filename)[0], len(chunks), time.time())
-            )
-            doc_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+            return {"doc_id": row[0], "skipped": True, "n_chunks": 0}
+
+        con.execute(
+            "INSERT INTO documents(doc_hash, filename, title, n_chunks, created_at) VALUES (?, ?, ?, ?, ?)",
+            (h, filename, os.path.splitext(filename)[0], len(chunks), time.time())
+        )
+        doc_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         if chunks:
             embs = embed_texts(chunks)
@@ -224,10 +223,10 @@ def save_document(filename: str, raw: bytes, chunks: List[str]):
                     (doc_id, idx, chunk, json.dumps(emb), json.dumps(tf))
                 )
                 update_df(con, list(tf.keys()))
-    return True
+    return {"doc_id": doc_id, "skipped": False, "n_chunks": len(chunks)}
 
 # --------- Hybrid search ---------
-def hybrid_search(query: str, top_k=TOP_K) -> List[Dict[str,Any]]:
+def hybrid_search(query: str, top_k=TOP_K) -> List[Dict[str, Any]]:
     q_emb = np.array(embed_texts([query])[0], dtype=np.float32)
     q_tf = tf_counts(query)
 
@@ -238,20 +237,26 @@ def hybrid_search(query: str, top_k=TOP_K) -> List[Dict[str,Any]]:
             FROM chunks JOIN documents ON chunks.doc_id = documents.id
         """).fetchall()
 
+    # precompute idf for query terms once
+    with db() as con2:
+        total2 = all_chunk_count(con2)
+        idf_cache = {t: idf(con2, t, total2) for t in q_tf}
+
     res = []
-    # compute keyword-TFIDF score
     for cid, doc_id, idx, text, emb_json, title in rows:
+        # quick prefilter: skip chunks with no overlapping tokens to reduce compute
+        if not (set(tf_counts(text).keys()) & set(q_tf.keys())):
+            # Still compute semantic to avoid missing paraphrases
+            pass
         emb = np.array(json.loads(emb_json), dtype=np.float32)
         sem = cosine(q_emb, emb)
 
-        tf = tf_counts(text)
+        tfc = tf_counts(text)
         kw = 0.0
         # TF-IDF dot product (query vs chunk)
-        with db() as con2:
-            total = all_chunk_count(con2)
-            for t, qcnt in q_tf.items():
-                idf_q = idf(con2, t, total)
-                kw += (qcnt * idf_q) * (tf.get(t,0) * idf_q)
+        for t, qcnt in q_tf.items():
+            idf_t = idf_cache.get(t, 0.0)
+            kw += (qcnt * idf_t) * (tfc.get(t, 0) * idf_t)
 
         res.append({"chunk_id": cid, "doc_id": doc_id, "idx": idx,
                     "title": title, "text": text, "semantic": sem, "keyword": kw})
@@ -268,6 +273,62 @@ def hybrid_search(query: str, top_k=TOP_K) -> List[Dict[str,Any]]:
     res.sort(key=lambda r: r["hybrid"], reverse=True)
     return res[:top_k]
 
+# --------- Query helpers (intent, transform, shaping, policy, hallucination) ---------
+INTENT_SMALLTALK = re.compile(r"^\s*(hi|hello|hey|thanks|thank you|good (morning|afternoon|evening))\b", re.I)
+
+def is_smalltalk(q: str) -> bool:
+    return bool(INTENT_SMALLTALK.match(q or ""))
+
+def transform_query_basic(q: str) -> str:
+    """Very light transform to improve keyword match signal."""
+    q = (q or "").lower()
+    q = q.translate(str.maketrans("", "", string.punctuation))
+    toks = [t for t in q.split() if t and t not in STOP]
+    return " ".join(toks[:8]) or q
+
+def rrf_merge(hits_list: List[List[Dict[str, Any]]], k: int = 60) -> List[Dict[str, Any]]:
+    rank = {}
+    merged = {}
+    for hits in hits_list:
+        for i, h in enumerate(hits):
+            key = (h["title"], h["idx"])
+            rank[key] = rank.get(key, 0) + 1.0 / (k + i + 1)
+            if key not in merged:
+                merged[key] = h
+    out = list(merged.values())
+    out.sort(key=lambda r: rank[(r["title"], r["idx"])], reverse=True)
+    return out
+
+SENSITIVE_HINTS = {
+    "pii": ["social security", "ssn", "credit card", "password", "passport number"],
+    "medical": ["diagnose", "treatment plan", "prescribe", "dose", "dosing"],
+    "legal": ["create contract", "legal advice", "sue", "lawsuit", "liable"]
+}
+
+def policy_gate(q: str) -> Optional[str]:
+    ql = (q or "").lower()
+    if any(term in ql for term in SENSITIVE_HINTS["pii"]):
+        return "I can’t help with requests that involve personal sensitive identifiers (PII)."
+    if any(term in ql for term in SENSITIVE_HINTS["medical"]):
+        return "I’m not a medical professional; I can’t provide medical advice. Consider consulting a qualified clinician."
+    if any(term in ql for term in SENSITIVE_HINTS["legal"]):
+        return "I’m not a lawyer; I can’t provide legal advice. Consider consulting a qualified attorney."
+    return None
+
+def choose_style(q: str) -> str:
+    ql = (q or "").lower()
+    if any(w in ql for w in ["list", "steps", "bullets", "bullet", "enumerate"]):
+        return "list"
+    if any(w in ql for w in ["table", "tabular", "columns"]):
+        return "table"
+    return "default"
+
+def evidence_filter(answer: str) -> str:
+    """Keep only sentences that cite evidence [C#]; else return 'insufficient evidence'."""
+    parts = re.split(r'(?<=[.!?])\s+', (answer or "").strip())
+    kept = [p for p in parts if re.search(r"\[C\d+\]", p)]
+    return " ".join(kept) if kept else "insufficient evidence"
+
 # --------- API models ---------
 class QueryIn(BaseModel):
     query: str
@@ -277,6 +338,7 @@ class QueryIn(BaseModel):
 async def ingest(files: List[UploadFile] = File(...)):
     if not files:
         raise HTTPException(400, "No files provided")
+
     out = []
     for f in files:
         data = await f.read()
@@ -288,9 +350,9 @@ async def ingest(files: List[UploadFile] = File(...)):
             out.append({"file": f.filename, "n_chunks": 0, "note": "No extractable text (maybe scanned PDF)."})
             continue
         chunks = chunk_text(text, CHUNK_SIZE, CHUNK_OVERLAP)
-        save_document(f.filename, data, chunks)
-        out.append({"file": f.filename, "n_chunks": len(chunks)})
-    return {"status":"ok", "ingested": out}
+        res = save_document(f.filename, data, chunks)
+        out.append({"file": f.filename, "n_chunks": res["n_chunks"], "skipped": res["skipped"]})
+    return {"status": "ok", "ingested": out}
 
 @app.post("/query")
 def query(q: QueryIn):
@@ -298,16 +360,25 @@ def query(q: QueryIn):
     if not user_q:
         return {"answer": "Please type a question.", "citations": []}
 
-    # light smalltalk guard
-    if re.match(r"^\s*(hi|hello|hey)\b", user_q, re.I):
+    # policy gate
+    guard = policy_gate(user_q)
+    if guard:
+        return {"answer": guard, "citations": []}
+
+    # smalltalk
+    if is_smalltalk(user_q):
         return {"answer": "Hi! Upload PDFs, then ask about them.", "citations": []}
 
-    # retrieve candidates
-    hits = hybrid_search(user_q, top_k=TOP_K)
+    # retrieve (original + transformed) and fuse via RRF
+    hits_a = hybrid_search(user_q, top_k=TOP_K)
+    tq = transform_query_basic(user_q)
+    hits_b = hybrid_search(tq, top_k=TOP_K) if tq != user_q else []
+    hits = rrf_merge([hits_a, hits_b] if hits_b else [hits_a])
+
     if not hits or max(h["semantic"] for h in hits) < SIM_THRESHOLD:
         return {"answer": "insufficient evidence", "citations": []}
 
-    # take top-K, then de-duplicate by (title, idx)
+    # take top-K, then dedupe by (title, idx)
     chosen = hits[:FINAL_K]
     uniq, seen = [], set()
     for c in chosen:
@@ -316,36 +387,41 @@ def query(q: QueryIn):
             continue
         seen.add(key)
         uniq.append(c)
-
     if not uniq:
         return {"answer": "insufficient evidence", "citations": []}
 
-    # build compact evidence context (trim chunks for speed)
-    MAX_CHARS = 800
+    # build compact evidence context
+    style = choose_style(user_q)
     blocks = []
     for i, c in enumerate(uniq, start=1):
-        snippet = (c["text"] or "")[:MAX_CHARS]
+        snippet = (c["text"] or "")[:MAX_CHARS_PER_BLOCK]
         blocks.append(f"[C{i}] {snippet}\n-- Source: {c['title']} (chunk {c['idx']})")
     context = "\n\n".join(blocks)
 
-    # prompt: encourage aggregation + citing all claims; strict insufficiency rule
-    sys = (
-        "Answer strictly from the EVIDENCE CONTEXT. "
-        "If multiple relevant figures or time points exist, report each as a concise list. "
-        "Include inline citations for every claim you make (e.g., [C1], [C2]). "
-        "If evidence is insufficient, reply exactly: insufficient evidence."
-    )
+    # prompt shaping
+    if style == "list":
+        sys = ("Answer strictly from EVIDENCE CONTEXT. Provide a concise bulleted list. "
+               "Include inline citations [C#] for each bullet. "
+               "If evidence is insufficient, reply exactly: insufficient evidence.")
+    elif style == "table":
+        sys = ("Answer strictly from EVIDENCE CONTEXT. Provide a compact markdown table with appropriate columns. "
+               "Include inline citations [C#] in the table cells. "
+               "If evidence is insufficient, reply exactly: insufficient evidence.")
+    else:
+        sys = ("Answer strictly from the EVIDENCE CONTEXT. "
+               "Include inline citations [C#] for every claim. "
+               "If evidence is insufficient, reply exactly: insufficient evidence.")
+
     prompt = f"QUESTION:\n{user_q}\n\nEVIDENCE CONTEXT:\n{context}"
+    answer = chat([{"role": "system", "content": sys},
+                   {"role": "user", "content": prompt}])
 
-    # generate (ensure chat() uses a valid model like 'mistral-small' and modest max_tokens)
-    answer = chat(
-        [
-            {"role": "system", "content": sys},
-            {"role": "user", "content": prompt},
-        ],
-    )
+    # post-hoc hallucination filter
+    answer = evidence_filter(answer)
+    if answer == "insufficient evidence":
+        return {"answer": "insufficient evidence", "citations": []}
 
-    # --- show only citations actually used in the answer ---
+    # show only citations actually used in the answer
     used_nums = set(re.findall(r"\[C(\d+)\]", answer))
     if used_nums:
         cits = []
@@ -358,32 +434,21 @@ def query(q: QueryIn):
                     "score_semantic": round(c["semantic"], 3),
                 })
     else:
-        # fallback: if model forgot to cite, show all uniq (or return insufficient if you prefer)
-        cits = [
-            {
-                "label": f"[C{i}]",
-                "title": c["title"],
-                "chunk_index": c["idx"],
-                "score_semantic": round(c["semantic"], 3),
-            }
-            for i, c in enumerate(uniq, start=1)
-        ]
+        cits = [{"label": f"[C{i}]",
+                 "title": c["title"],
+                 "chunk_index": c["idx"],
+                 "score_semantic": round(c["semantic"], 3)}
+                for i, c in enumerate(uniq, start=1)]
 
     return {"answer": answer, "citations": cits}
 
-
-
-import os
-from fastapi import HTTPException
-
+# --------- Debug endpoints ---------
 @app.get("/debug/env")
 def debug_env():
-    # True/False only; does not leak the key
     return {"has_mistral_key": bool(os.getenv("MISTRAL_API_KEY"))}
 
 @app.get("/debug/ping-emb")
 def debug_ping_emb():
-    import requests
     key = os.getenv("MISTRAL_API_KEY")
     if not key:
         return {"ok": False, "error": "MISTRAL_API_KEY not set"}
@@ -391,7 +456,7 @@ def debug_ping_emb():
         r = requests.post(
             "https://api.mistral.ai/v1/embeddings",
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={"model": "mistral-embed", "input": ["hello"]},
+            json={"model": "mistral-embed-v0.2", "input": ["hello"]},
             timeout=30,
         )
         return {"ok": r.status_code < 400, "status": r.status_code, "body": r.text[:200]}
@@ -419,5 +484,3 @@ async def preview_chunks(files: List[UploadFile] = File(...)):
             "expected_chunks": expected
         })
     return {"status": "ok", "preview": previews}
-
-
