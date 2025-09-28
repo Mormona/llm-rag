@@ -171,17 +171,35 @@ def read_pdf_bytes(b: bytes) -> str:
             pages.append("")
     return "\n".join(pages)
 
-def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> List[str]:
-    text = re.sub(r"\s+", " ", text).strip()
-    out, i = [], 0
-    while i < len(text):
+def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> list[str]:
+    # normalize whitespace
+    text = re.sub(r"\s+", " ", (text or "")).strip()
+    if not text:
+        return []
+
+    # clamp overlap to be strictly less than size
+    if overlap >= size:
+        overlap = max(0, size // 5)  # fallback to 20% of size if misconfigured
+
+    step = max(1, size - overlap)
+
+    out = []
+    i = 0
+    L = len(text)
+    while i < L:
         chunk = text[i:i+size]
-        last = chunk.rfind(". ")
-        if last > size * 0.6:
-            chunk = chunk[:last+1]
-        out.append(chunk)
-        i += max(1, len(chunk) - overlap)
-    return [c for c in out if c.strip()]
+
+        # try not to cut mid-sentence for large chunks
+        if len(chunk) > int(size * 0.6):
+            last_period = chunk.rfind(". ")
+            if last_period != -1 and last_period > int(size * 0.4):
+                chunk = chunk[:last_period+1]
+
+        out.append(chunk.strip())
+        i += step  # fixed step, not len(chunk) - overlap
+
+    return [c for c in out if c]
+
 
 # --------- Persist ---------
 def save_document(filename: str, raw: bytes, chunks: List[str]):
@@ -379,4 +397,27 @@ def debug_ping_emb():
         return {"ok": r.status_code < 400, "status": r.status_code, "body": r.text[:200]}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+@app.post("/debug/preview-chunks")
+async def preview_chunks(files: List[UploadFile] = File(...)):
+    previews = []
+    for f in files:
+        data = await f.read()
+        text = read_pdf_bytes(data)
+        norm = re.sub(r"\s+", " ", text).strip()
+        L = len(norm)
+        eff_overlap = CHUNK_OVERLAP if CHUNK_OVERLAP < CHUNK_SIZE else max(0, CHUNK_SIZE // 5)
+        step = max(1, CHUNK_SIZE - eff_overlap)
+        expected = 0 if L == 0 else 1 + max(0, (L - 1) // step)
+        previews.append({
+            "file": f.filename,
+            "text_length_chars": L,
+            "CHUNK_SIZE": CHUNK_SIZE,
+            "CHUNK_OVERLAP": CHUNK_OVERLAP,
+            "effective_overlap_used": eff_overlap,
+            "step": step,
+            "expected_chunks": expected
+        })
+    return {"status": "ok", "preview": previews}
+
 
