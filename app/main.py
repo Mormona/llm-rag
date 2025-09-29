@@ -121,7 +121,7 @@ def _mistral_headers():
         raise HTTPException(500, "Missing MISTRAL_API_KEY (set it in Space → Settings → Secrets).")
     return {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
 
-def chat(messages, model: str = CHAT_MODEL_DEFAULT, temperature=0.0, max_tokens=220) -> str:
+def chat(messages, model: str = CHAT_MODEL_DEFAULT, temperature=0.0, max_tokens=700) -> str:
     r = requests.post(
         f"{MISTRAL_BASE}/chat/completions",
         headers=_mistral_headers(),
