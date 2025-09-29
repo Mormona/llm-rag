@@ -65,13 +65,13 @@ flowchart TD
   LLM --> F["Optional Evidence Check"]
   F --> A["Answer + Citations"]
   A --> U2
-
+```
 ---
 
 ## 🚀 Quickstart
 
 ### Run Locally
-```bash
+
 # 1. Create virtual environment
 python -m venv .venv && source .venv/bin/activate
 
@@ -83,5 +83,59 @@ export MISTRAL_API_KEY=YOUR_KEY
 
 # 4. Launch the FastAPI app
 uvicorn main:app --reload
+Open [http://localhost:8000/ui](http://localhost:8000/ui) in your browser to upload PDFs and chat with the system.
+
+### Deploy on Hugging Face Spaces (Docker)
+- Set repository secret: `MISTRAL_API_KEY`  
+- Space type: **Docker**  
+- The container automatically runs:
+  ```bash
+  uvicorn main:app --host 0.0.0.0 --port $PORT
+```
+
+## 📐 Design Considerations
+
+### Chunking
+- **Size & overlap**: We use ~1200 characters per chunk with 200 overlap.  
+  - Larger chunks → better semantic coherence but weaker keyword specificity.  
+  - Smaller chunks → better recall for keywords but fragmented meaning.  
+  - Overlap ensures context isn’t lost across chunk boundaries.
+- **Alternative strategies**: Sentence-aware or token-aware splitting could improve precision but add complexity.
+
+### Hybrid Retrieval
+- **Semantic embeddings**: Capture meaning via cosine similarity over `mistral-embed`.  
+- **Keyword scoring**: TF-IDF ensures exact matches matter.  
+- **Blended score**: A weighted combination balances precision and recall.  
+- **RRF fusion**: Combines original vs transformed queries for robustness.
+
+### Threshold Refusal
+- A **similarity threshold** is applied.  
+- If top-k evidence doesn’t meet it, the system returns *“insufficient evidence”*.  
+- This prevents unsupported answers.
+
+### Answer Shaping
+- Prompt templates adapt style: default narrative, bulleted list, or markdown table.  
+- Inline citations `[C1]`, `[C2]` are mandatory for each claim.
+
+### Hallucination Control
+- Optional post-hoc filter (toggle with `ENABLE_EVIDENCE_CHECK=1`) drops sentences without clear citation support.  
+- Policy gate refuses unsafe queries (PII, medical, legal).
+
+---
+
+## 📚 Libraries & References
+
+This project avoids external RAG/search libraries and third-party vector databases. Core components:
+
+- [**FastAPI**](https://fastapi.tiangolo.com/) — web framework for defining endpoints  
+- [**Uvicorn**](https://www.uvicorn.org/) — ASGI server to run the app  
+- [**PyPDF2**](https://pypi.org/project/PyPDF2/) — PDF parsing and text extraction  
+- [**SQLite**](https://www.sqlite.org/index.html) — lightweight database to persist documents, chunks, embeddings  
+- [**NumPy**](https://numpy.org/) — vector operations (cosine similarity, normalization)  
+- [**Mistral Python SDK (`mistralai`)**](https://github.com/mistralai/client-python) — interface to Mistral APIs  
+  - [Chat API](https://docs.mistral.ai/platform/endpoints/chat/) for generation  
+  - [Embeddings API](https://docs.mistral.ai/capabilities/embeddings/overview/) for vectorization  
+
+---
 
 
