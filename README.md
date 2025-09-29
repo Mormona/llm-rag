@@ -94,6 +94,7 @@ Open [http://localhost:8000/ui](http://localhost:8000/ui) in your browser to upl
 - The container automatically runs:
   ```bash
   uvicorn app.main:app --host 0.0.0.0 --port $PORT
+  ```
 
 ## 📐 Design Considerations
 
