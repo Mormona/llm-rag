@@ -465,6 +465,20 @@ def query(q: QueryIn):
             {"role": "user",  "content": prompt},
         ],
     )
+    trim = (answer or "").strip()
+    if not re.search(r'[.!?]"?$', trim):
+        # Ask for a one-shot continuation to finish the sentence—no new info
+        continuation = chat(
+            [
+                {"role": "system", "content": sys},
+                {"role": "user",  "content": prompt},
+                {"role": "assistant", "content": trim},
+                {"role": "user", "content": "Continue the previous answer. Finish the last sentence only; do not add new facts. Keep existing [C#] citations as-is."}
+            ],
+            max_tokens=120,  # small, just to close the thought
+        )
+        answer = (trim + " " + continuation.strip()).strip()
+
 
     # ---- evidence check (optional, controlled by env var) ----
     if ENABLE_EVIDENCE_CHECK:
