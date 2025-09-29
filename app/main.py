@@ -15,6 +15,7 @@ MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
 MISTRAL_BASE = "https://api.mistral.ai/v1"
 EMBED_MODEL_CANDIDATES = ["mistral-embed-v0.2", "mistral-embed"]
 CHAT_MODEL_DEFAULT = "mistral-small"  # valid, fast
+ENABLE_EVIDENCE_CHECK = os.getenv("ENABLE_EVIDENCE_CHECK", "0") == "1"
 
 DB_PATH = "rag.db"
 DOC_DIR = "storage"
@@ -323,6 +324,35 @@ def choose_style(q: str) -> str:
         return "table"
     return "default"
 
+def evidence_check(answer: str, uniq_chunks: List[Dict[str, Any]]) -> str:
+    """
+    Light post-hoc check:
+    - Each sentence must include at least one [C#]
+    - At least one cited chunk must share a token with the sentence
+    If nothing passes, fall back to the original answer (avoid over-deleting).
+    """
+    if not (answer or "").strip():
+        return answer
+    sentences = re.split(r'(?<=[.!?])\s+', answer.strip())
+    kept = []
+    for s in sentences:
+        tags = re.findall(r"\[C(\d+)\]", s)
+        if not tags:
+            continue
+        sent_tokens = set(tokenize(s))
+        ok = False
+        for t in tags:
+            i = int(t) - 1
+            if 0 <= i < len(uniq_chunks):
+                chunk_tokens = set(tokenize(uniq_chunks[i].get("text") or ""))
+                if sent_tokens & chunk_tokens:
+                    ok = True
+                    break
+        if ok:
+            kept.append(s)
+    return " ".join(kept) if kept else answer
+
+
 def evidence_filter(answer: str) -> str:
     """Keep only sentences that cite evidence [C#]; else return 'insufficient evidence'."""
     parts = re.split(r'(?<=[.!?])\s+', (answer or "").strip())
@@ -378,7 +408,6 @@ def query(q: QueryIn):
         return {"answer": "insufficient evidence", "citations": []}
 
     # ---- adaptive selection ----
-    # If the candidate pool is tiny, keep them all. Otherwise take top-K.
     TINY_THRESHOLD = 5
     selected = hits if len(hits) <= TINY_THRESHOLD else hits[:FINAL_K]
 
@@ -429,13 +458,17 @@ def query(q: QueryIn):
 
     prompt = f"QUESTION:\n{user_q}\n\nEVIDENCE CONTEXT:\n{context}"
 
-    # ---- generate (chat() should default to temperature=0.0, max_tokens ~200–300) ----
+    # ---- generate ----
     answer = chat(
         [
             {"role": "system", "content": sys},
             {"role": "user",  "content": prompt},
         ],
     )
+
+    # ---- evidence check (optional, controlled by env var) ----
+    if ENABLE_EVIDENCE_CHECK:
+        answer = evidence_check(answer, uniq)
 
     # ---- show only citations actually used in the answer (fallback to all uniq if none) ----
     used_nums = set(re.findall(r"\[C(\d+)\]", answer or ""))
@@ -450,7 +483,6 @@ def query(q: QueryIn):
                     "score_semantic": round(c["semantic"], 3),
                 })
     else:
-        # If the model forgot to include tags, keep the answer but show all evidence blocks used.
         cits = [{"label": f"[C{i}]",
                  "title": c["title"],
                  "chunk_index": c["idx"],
@@ -458,7 +490,6 @@ def query(q: QueryIn):
                 for i, c in enumerate(uniq, start=1)]
 
     return {"answer": answer, "citations": cits}
-
 
 
 # --------- Debug endpoints ---------
