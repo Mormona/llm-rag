@@ -15,6 +15,9 @@ Upload PDFs, index them (semantic + keyword), and ask questions via a minimal we
 Deployed on **Hugging Face Spaces** (Docker) and runnable **locally**.
 
 ---
+UI Demo (Hugging Face Space): https://huggingface.co/spaces/MichelleHF/LLM-Rag 
+
+--- 
 
 ## ✨ Features
 
