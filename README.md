@@ -66,18 +66,26 @@ flowchart TD
 ### Run Locally
 
 #### 1. Create virtual environment
+```bash
 python -m venv .venv && source .venv/bin/activate
+```
 
 #### 2. Install dependencies
+```bash
 pip install -r requirements.txt
+```
 
 #### 3. Set your Mistral API key
+```bash
 export MISTRAL_API_KEY=YOUR_KEY
+```
 Replace YOUR_KEY with your personal API key.
 Do not commit secrets to GitHub.
 
 #### 4. Launch the FastAPI app
-uvicorn main:app --reload
+```bash
+uvicorn app.main:app --reload
+```
 Open [http://localhost:8000/ui](http://localhost:8000/ui) in your browser to upload PDFs and chat with the system.
 
 ### Deploy on Hugging Face Spaces (Docker)
@@ -85,7 +93,7 @@ Open [http://localhost:8000/ui](http://localhost:8000/ui) in your browser to upl
 - Space type: **Docker**  
 - The container automatically runs:
   ```bash
-  uvicorn main:app --host 0.0.0.0 --port $PORT
+  uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
 ## 📐 Design Considerations
 
