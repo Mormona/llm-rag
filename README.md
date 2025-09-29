@@ -52,17 +52,17 @@ Deployed on **Hugging Face Spaces** (Docker) and runnable **locally**.
 flowchart TD
   U[User] -->|upload PDF| I[POST /ingest]
   I --> X[PyPDF2: extract text]
-  X --> C[Chunker (size + overlap)]
-  C --> E[Embeddings (Mistral) + TF counts]
+  X --> C["Chunker (size + overlap)"]
+  C --> E["Embeddings (Mistral) + TF counts"]
   E --> DB[(SQLite: documents, chunks, vocab)]
 
   U2[User] -->|ask query| Q[POST /query]
-  Q --> T[Intent + Transform]
-  T --> H[Hybrid Search (cosine + TF-IDF)]
-  H --> R[Rank, De-dup, Select]
-  R --> EC[Evidence Context]
-  EC --> LLM[Mistral Chat]
-  LLM --> F[Optional Evidence Check]
-  F --> A[Answer + Citations]
+  Q --> T["Intent + Transform"]
+  T --> H["Hybrid Search (cosine + TF-IDF)"]
+  H --> R["Rank, De-dup, Select"]
+  R --> EC["Evidence Context"]
+  EC --> LLM["Mistral Chat"]
+  LLM --> F["Optional Evidence Check"]
+  F --> A["Answer + Citations"]
   A --> U2
 
