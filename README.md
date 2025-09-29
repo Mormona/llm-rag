@@ -1,11 +1,4 @@
----
-title: LLM-RAG
-emoji: 📚
-colorFrom: indigo
-colorTo: blue
-sdk: docker
-pinned: false
----
+
 
 # 📚 LLM-RAG: Retrieval-Augmented Generation Mini-Pipeline
 
