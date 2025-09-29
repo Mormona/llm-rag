@@ -66,3 +66,22 @@ flowchart TD
   F --> A["Answer + Citations"]
   A --> U2
 
+---
+
+## 🚀 Quickstart
+
+### Run Locally
+```bash
+# 1. Create virtual environment
+python -m venv .venv && source .venv/bin/activate
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Set your Mistral API key
+export MISTRAL_API_KEY=YOUR_KEY
+
+# 4. Launch the FastAPI app
+uvicorn main:app --reload
+
+
