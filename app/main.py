@@ -447,14 +447,22 @@ def query(q: QueryIn):
             "If evidence is insufficient, reply exactly: insufficient evidence."
         )
     else:
-        sys = (
-            "Answer strictly from the EVIDENCE CONTEXT. "
-            "Use exact percentages and month/year when present. "
-            "If the evidence reports a range or qualitative bound (e.g., 'more than 70%'), report that faithfully. "
-            "When multiple time points exist, list each explicitly and include inline citations for each figure/bound "
-            "(e.g., 53% in June 2024 [C1]; more than 70% by July 2025 [C2]). "
+        # sys = (
+        #     "Answer strictly from the EVIDENCE CONTEXT. "
+        #     "Use exact percentages and month/year when present. "
+        #     "If the evidence reports a range or qualitative bound (e.g., 'more than 70%'), report that faithfully. "
+        #     "When multiple time points exist, list each explicitly and include inline citations for each figure/bound "
+        #     "(e.g., 53% in June 2024 [C1]; more than 70% by July 2025 [C2]). "
+        #     "If evidence is insufficient, reply exactly: insufficient evidence."
+        # )
+      sys = (
+            "Answer strictly from the EVIDENCE CONTEXT.\n"
+            "Be concise: 1–2 sentences max.\n"
+            "Use exact percentages and month/year if present; include inline [C#] for each figure.\n"
+            "If the evidence reports a range/bound (e.g., 'more than 70%'), report it verbatim.\n"
             "If evidence is insufficient, reply exactly: insufficient evidence."
         )
+
 
     prompt = f"QUESTION:\n{user_q}\n\nEVIDENCE CONTEXT:\n{context}"
 
