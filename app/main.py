@@ -491,7 +491,6 @@ def query(q: QueryIn):
 
     return {"answer": answer, "citations": cits}
 
-
 # --------- Debug endpoints ---------
 @app.get("/debug/env")
 def debug_env():
