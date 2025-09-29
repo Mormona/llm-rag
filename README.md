@@ -18,31 +18,28 @@ Deployed on **Hugging Face Spaces** (Docker) and runnable **locally**.
 
 ## ✨ Features
 
-- **Data Ingestion**
-  - `POST /ingest` accepts one or more PDFs.
-  - Extracts text with PyPDF2, normalizes whitespace, chunks with overlap, embeds with Mistral.
-  - Stores chunks, embeddings (as JSON), and TF counts in **SQLite** (no external vector DB).
-  - Deduplicates by SHA-256 file hash.
+- **Data Ingestion**  
+  Upload one or more PDFs (`POST /ingest`). Extract text (PyPDF2), normalize whitespace, chunk with overlap, embed with Mistral, and store chunks/embeddings/TF counts in **SQLite**.  
+  Deduplication is handled via SHA-256 file hashes.
 
-- **Query Processing**
-  - Smalltalk gate (“hello” etc.) and policy gate (PII/legal/medical).
-  - Light query transform + **RRF** merge of original/normalized queries.
+- **Query Processing**  
+  Greeting/smalltalk detection, policy gate (PII/legal/medical), light query transform, and **RRF** merge of original vs normalized queries.
 
-- **Hybrid Retrieval**
-  - **Cosine** similarity over Mistral embeddings + **TF-IDF** keyword signal.
-  - Weighted hybrid score, re-rank, de-duplicate.
+- **Hybrid Retrieval**  
+  Cosine similarity over Mistral embeddings + TF-IDF keyword signal.  
+  Scores blended with configurable weight, then re-ranked and deduplicated.
 
-- **Post-processing**
-  - Adaptive selection (use all chunks for tiny corpora; otherwise top-K).
-  - Evidence context builder with inline citation tags `[C1]`, `[C2]`, …
-  - Optional post-hoc **evidence check** (toggle via env var) to keep only well-cited sentences.
+- **Post-processing**  
+  Top-K selection with similarity threshold → *“insufficient evidence”* if not met.  
+  Evidence builder with inline citations `[C1]`, `[C2]`.  
+  Optional **evidence check** to drop low-support sentences.
 
-- **Answer Generation**
-  - **Mistral Chat** (e.g., `mistral-small`) with prompt templates (default/list/table).
-  - Returns **“insufficient evidence”** when similarity falls below a threshold or nothing supports the claim.
+- **Answer Generation**  
+  Mistral Chat with prompt templates (default, list, table).  
+  Always cites evidence; refuses unsupported answers.
 
-- **UI**
-  - `GET /ui` serves a simple HTML/JS chat: upload PDFs, ask questions, see citations.
+- **UI**  
+  Minimal HTML/JS served at `/ui` for PDF upload and chat.
 
 ---
 
@@ -72,16 +69,18 @@ flowchart TD
 
 ### Run Locally
 
-# 1. Create virtual environment
+#### 1. Create virtual environment
 python -m venv .venv && source .venv/bin/activate
 
-# 2. Install dependencies
+#### 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Set your Mistral API key
+#### 3. Set your Mistral API key
 export MISTRAL_API_KEY=YOUR_KEY
+Replace YOUR_KEY with your personal API key.
+Do not commit secrets to GitHub.
 
-# 4. Launch the FastAPI app
+#### 4. Launch the FastAPI app
 uvicorn main:app --reload
 Open [http://localhost:8000/ui](http://localhost:8000/ui) in your browser to upload PDFs and chat with the system.
 
